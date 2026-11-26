@@ -82,8 +82,8 @@ local function hinge(c: Container, mover: Model, closed: CFrame, open: CFrame, h
 	end)
 	value.Parent = mover
 	local busy = false
-	local function toggle()
-		if busy then
+	local function toggle(player: Player)
+		if busy or player:GetAttribute("Tool") ~= nil then -- print kit or camera out: the click is for the tool
 			return
 		end
 		busy = true

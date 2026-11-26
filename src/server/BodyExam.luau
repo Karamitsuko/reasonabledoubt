@@ -172,6 +172,9 @@ function BodyExam.setup(s: Setup): { minute: number, bar: string }
 	cd.MaxActivationDistance = 10
 	cd.Parent = s.body
 	cd.MouseClick:Connect(function(player)
+		if player:GetAttribute("Tool") ~= nil then
+			return
+		end
 		s.discover("body", player)
 		openBody:FireClient(player, { name = fullName(victim), method = case.method })
 	end)

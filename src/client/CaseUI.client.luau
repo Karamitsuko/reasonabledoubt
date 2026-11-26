@@ -157,6 +157,8 @@ local KIND_COLOUR: { [string]: Color3 } = {
 	person = Color3.fromRGB(240, 168, 196),
 	place = Color3.fromRGB(156, 202, 238),
 	fact = Color3.fromRGB(176, 224, 162),
+	print = Color3.fromRGB(206, 192, 244),
+	photo = Color3.fromRGB(244, 243, 238),
 	custom = Color3.fromRGB(236, 232, 224),
 }
 local KIND_LABEL: { [string]: string } = {
@@ -164,8 +166,17 @@ local KIND_LABEL: { [string]: string } = {
 	person = "PERSON",
 	place = "PLACE",
 	fact = "FACT",
+	print = "PRINT",
+	photo = "PHOTO",
 	custom = "NOTE",
 }
+
+-- Photos taken this session (ToolsUI keeps them); saved photos from earlier sessions are text only.
+local function photoImage(n: any): string?
+	local folder = player:FindFirstChild("PhotoImages")
+	local v = folder and n and folder:FindFirstChild(tostring(n))
+	return if v and v:IsA("StringValue") then v.Value else nil
+end
 
 local function clear(frame: Instance)
 	for _, c in frame:GetChildren() do
@@ -552,6 +563,17 @@ local function buildNote(note: any, item: any): TextButton
 		local lt = text(content, l, 12, NOTE_INK, Enum.Font.Gotham, 2 + i)
 		lt.ZIndex = 5
 	end
+	local img = if item then photoImage(item.photo) else nil
+	if img then
+		local il = Instance.new("ImageLabel")
+		il.Size = UDim2.new(1, 0, 0, 104)
+		il.Image = img
+		il.ScaleType = Enum.ScaleType.Crop
+		il.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+		il.LayoutOrder = 50
+		il.ZIndex = 5
+		il.Parent = content
+	end
 	if note.by and not item then
 		local by = text(content, "- " .. note.by, 10, Color3.fromRGB(110, 100, 90), Enum.Font.GothamMedium, 99)
 		by.ZIndex = 5
@@ -611,7 +633,7 @@ local function renderDrawer(b: any)
 			pinned[n.item] = true
 		end
 	end
-	local order = { evidence = 1, person = 2, place = 3, fact = 4 }
+	local order = { evidence = 1, person = 2, place = 3, fact = 4, print = 5, photo = 6 }
 	local keys = {}
 	for key, item in b.items do
 		if not pinned[key] then
@@ -661,7 +683,7 @@ local function renderBoard(b: any)
 	for _, n in b.notes do
 		seen[n.id] = true
 		local item = if n.item then b.items[n.item] else nil
-		local sig = if item then (item.title .. "|" .. table.concat(item.lines, "|")) else ("custom|" .. tostring(n.text))
+		local sig = if item then (item.title .. "|" .. table.concat(item.lines, "|") .. (if photoImage(item.photo) then "|img" else "")) else ("custom|" .. tostring(n.text))
 		local f = noteFrames[n.id]
 		if f and noteSig[n.id] ~= sig then
 			f:Destroy()
@@ -695,6 +717,17 @@ local function renderBoard(b: any)
 	renderDrawer(b)
 end
 boardEvent.OnClientEvent:Connect(renderBoard)
+task.spawn(function()
+	-- Redraw when a photo's picture arrives so its note shows it.
+	local folder = player:WaitForChild("PhotoImages", 30)
+	if folder then
+		folder.ChildAdded:Connect(function()
+			if currentBoard then
+				renderBoard(currentBoard)
+			end
+		end)
+	end
+end)
 task.spawn(function()
 	local ok, b = pcall(function()
 		return getBoard:InvokeServer()

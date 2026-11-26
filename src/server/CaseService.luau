@@ -15,6 +15,8 @@ local Knowledge = require(script.Parent:WaitForChild("Knowledge"))
 local CaseBoard = require(script.Parent:WaitForChild("CaseBoard"))
 local Furnish = require(script.Parent:WaitForChild("Furnish"))
 local BodyExam = require(script.Parent:WaitForChild("BodyExam"))
+local Prints = require(script.Parent:WaitForChild("Prints"))
+local Photos = require(script.Parent:WaitForChild("Photos"))
 
 type World = BuildingGen.World
 type Citizen = CitizenGen.Citizen
@@ -28,6 +30,8 @@ export type CaseSave = {
 	result: string?,
 	board: CaseBoard.Board?,
 	body: BodyExam.BodyState?,
+	prints: Prints.PrintsState?,
+	photos: { Photos.Photo }?,
 }
 
 local MOTIVES = {
@@ -43,7 +47,7 @@ local citizens: { Citizen }
 local sim: CitizenSim.CitizenSim
 local furniture: Furnish.Furniture
 local case: Case
-local state: CaseSave = { found = {}, people = {}, todKnown = false, solved = false, result = nil, board = CaseBoard.new(), body = {} }
+local state: CaseSave = { found = {}, people = {}, todKnown = false, solved = false, result = nil, board = CaseBoard.new(), body = {}, prints = Prints.new(), photos = {} }
 local remotes: Folder
 local sceneFolder: Folder
 local caseSeed = 0
@@ -73,6 +77,16 @@ local function board(): CaseBoard.Board
 	return state.board :: CaseBoard.Board
 end
 
+local function printState(): Prints.PrintsState
+	state.prints = state.prints or Prints.new()
+	return state.prints :: Prints.PrintsState
+end
+
+-- With the print kit or camera out, clicks are for the tool, not for opening drawers.
+local function handsFree(player: Player): boolean
+	return player:GetAttribute("Tool") == nil
+end
+
 local function knowPerson(id: number, note: string?)
 	local key = tostring(id)
 	local notes = state.people[key]
@@ -89,7 +103,7 @@ local function knowPerson(id: number, note: string?)
 end
 
 -- Everything the player has learned, as notebook items. Pinned or not, these can go on the board.
-type Item = { kind: string, title: string, lines: { string } }
+type Item = { kind: string, title: string, lines: { string }, photo: number? }
 
 local function notebook(): { [string]: Item }
 	local victim = citizens[case.victimId]
@@ -120,6 +134,10 @@ local function notebook(): { [string]: Item }
 		for _, n in notes do
 			table.insert(lines, n)
 		end
+		local onFile = Prints.personLine(printState(), c.id)
+		if onFile then
+			table.insert(lines, onFile)
+		end
 		items["p:" .. key] = { kind = "person", title = fullName(c), lines = lines }
 		if c.homeRoom ~= case.sceneRoom then
 			place(c.homeRoom, "Home of " .. fullName(c) .. ".")
@@ -131,6 +149,12 @@ local function notebook(): { [string]: Item }
 		items["fact:" .. key] = { kind = "fact", title = title, lines = { line } }
 	end
 	BodyExam.facts(state.body or {}, case, receipt, fact)
+	Prints.items(printState(), citizens, function(key: string, kind: string, title: string, lines: { string })
+		items[key] = { kind = kind, title = title, lines = lines }
+	end)
+	Photos.items(state.photos or {}, function(key: string, kind: string, title: string, lines: { string }, n: number?)
+		items[key] = { kind = kind, title = title, lines = lines, photo = n }
+	end)
 	if table.find(state.found, "footprints") then
 		fact("shoe", "Killer's shoe size", ("Prints at the scene: size %d."):format(citizens[case.killerId].shoeSize))
 	end
@@ -309,6 +333,9 @@ local function placeScene()
 		cd.MaxActivationDistance = 10
 		cd.Parent = pr
 		cd.MouseClick:Connect(function(player)
+			if not handsFree(player) then
+				return
+			end
 			discover("footprints", player)
 		end)
 	end
@@ -343,6 +370,9 @@ local function placeScene()
 			cd.MaxActivationDistance = 10
 			cd.Parent = term
 			cd.MouseClick:Connect(function(player)
+				if not handsFree(player) then
+					return
+				end
 				discover("doorlog", player)
 			end)
 		elseif room.kind == "detective" then
@@ -392,8 +422,24 @@ local function placeScene()
 		boots:Destroy()
 	end
 
+	Prints.setup({
+		world = world,
+		citizens = citizens,
+		case = case,
+		seed = caseSeed,
+		furniture = furniture,
+		weapon = weapon,
+		boots = boots,
+		remotes = remotes,
+		state = printState,
+		changed = pushBoard,
+	})
+
 	-- Picking things up: evidence goes in a bag and onto the board; junk is just junk.
 	furniture.onItemClicked = function(player: Player, item: Model)
+		if not handsFree(player) then
+			return
+		end
 		local ev = item:GetAttribute("Evidence")
 		if typeof(ev) == "string" then
 			item:Destroy()
@@ -409,6 +455,14 @@ end
 
 local function ctx(): Knowledge.Ctx
 	return { case = case, world = world, citizens = citizens, todKnown = state.todKnown }
+end
+
+local function questionsFor(c: Citizen): { { id: string, text: string } }
+	local qs = Knowledge.questions(ctx(), c)
+	if c.id ~= case.victimId and not printState().taken[tostring(c.id)] then
+		table.insert(qs, { id = "prints", text = "Can I take your fingerprints?" })
+	end
+	return qs
 end
 
 local function onRigSpawned(c: Citizen, rig: Model)
@@ -440,7 +494,7 @@ local function onRigSpawned(c: Citizen, rig: Model)
 			citizenId = c.id,
 			name = fullName(c),
 			job = c.job,
-			questions = Knowledge.questions(ctx(), c),
+			questions = questionsFor(c),
 		})
 	end)
 end
@@ -466,6 +520,8 @@ function CaseService.start(args: { world: World, citizens: { Citizen }, sim: Cit
 		else
 			state.board = CaseBoard.normalize(state.board)
 		end
+		state.prints = Prints.normalize(state.prints)
+		state.photos = if typeof(state.photos) == "table" then state.photos else {}
 		if not state.body then
 			-- Saves from before the close-up exam: an inspected body keeps what it told you.
 			state.body = {}
@@ -498,6 +554,29 @@ function CaseService.start(args: { world: World, citizens: { Citizen }, sim: Cit
 		return boardPayload()
 	end
 
+	local setTool = remote("RemoteEvent", "SetTool") :: RemoteEvent
+	setTool.OnServerEvent:Connect(function(player: Player, tool: any)
+		player:SetAttribute("Tool", if tool == "prints" or tool == "camera" then tool else nil)
+	end)
+	Photos.setup({
+		world = world,
+		citizens = citizens,
+		case = case,
+		remotes = remotes,
+		photos = function()
+			state.photos = state.photos or {}
+			return state.photos :: { Photos.Photo }
+		end,
+		isKnown = function(id: number)
+			return state.people[tostring(id)] ~= nil
+		end,
+		changed = function()
+			-- A photo you took goes straight on the board.
+			CaseBoard.autoPin(board(), "photo:" .. #(state.photos or {}))
+			pushBoard()
+		end,
+	})
+
 	local boardAction = remote("RemoteFunction", "BoardAction") :: RemoteFunction
 	boardAction.OnServerInvoke = function(player: Player, action: any, args: any)
 		local changed, err = CaseBoard.apply(board(), player, action, args, function(item: string)
@@ -524,6 +603,19 @@ function CaseService.start(args: { world: World, citizens: { Citizen }, sim: Cit
 			return { text = "(They've walked off.)" }
 		end
 		sim:hold(c.id, 30, player)
+		if qid == "prints" then
+			local text
+			if Prints.willGive(case, c) then
+				printState().taken[tostring(c.id)] = true
+				knowPerson(c.id, "Gave you their fingerprints.")
+				text = "Fine. If it helps. (You roll each finger on the card.)"
+			else
+				knowPerson(c.id, "Refused to give fingerprints.")
+				text = if c.id == case.killerId then "No. Not without a warrant." else "I don't think so. I haven't done anything."
+			end
+			pushBoard()
+			return { text = text, questions = questionsFor(c) }
+		end
 		local a = Knowledge.answer(ctx(), c, qid, evidenceId)
 		local changed = knowPerson(c.id, a.note)
 		if a.addPeople then
@@ -537,7 +629,7 @@ function CaseService.start(args: { world: World, citizens: { Citizen }, sim: Cit
 		if changed or a.note then
 			pushBoard()
 		end
-		return { text = a.text, questions = Knowledge.questions(ctx(), c) }
+		return { text = a.text, questions = questionsFor(c) }
 	end
 
 	accuse.OnServerInvoke = function(player: Player, suspectId: any, motiveId: any)
@@ -595,7 +687,7 @@ end
 
 -- Wipe case progress (testing only): the scene stays, the board starts over.
 function CaseService.debugReset()
-	state = { found = {}, people = {}, todKnown = false, solved = false, result = nil, board = CaseBoard.new(), body = {} }
+	state = { found = {}, people = {}, todKnown = false, solved = false, result = nil, board = CaseBoard.new(), body = {}, prints = Prints.new(), photos = {} }
 	knowPerson(case.victimId, "Found dead at home: " .. world.rooms[case.sceneRoom].label .. ".")
 	CaseBoard.autoPin(board(), "place:" .. case.sceneRoom)
 	pushBoard()
