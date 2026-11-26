@@ -19,8 +19,12 @@ end
 
 local Schedule = {}
 
--- Returns a room id, or "offsite" for anywhere outside the building.
-function Schedule.locationAt(c: Citizen, totalMinutes: number): string
+function Schedule.isAsleep(c: Citizen, totalMinutes: number): boolean
+	return inWindow(totalMinutes % DAY, c.sleep, c.wake)
+end
+
+-- The routine without errands.
+local function baseLocation(c: Citizen, totalMinutes: number): string
 	local day = math.floor(totalMinutes / DAY)
 	local m = totalMinutes % DAY
 
@@ -54,6 +58,22 @@ function Schedule.locationAt(c: Citizen, totalMinutes: number): string
 	end
 
 	return c.homeRoom
+end
+
+-- Returns a room id, or "offsite" for anywhere outside the building.
+-- On top of the routine, awake people sometimes pop out for a short errand (a coffee, the corner store),
+-- so the building keeps moving through the day.
+function Schedule.locationAt(c: Citizen, totalMinutes: number): string
+	local loc = baseLocation(c, totalMinutes)
+	if loc == "offsite" or Schedule.isAsleep(c, totalMinutes) or #c.errandSpots == 0 then
+		return loc
+	end
+	local hourSlot = math.floor(totalMinutes / 60)
+	if totalMinutes % 60 < 20 and Rng.hash01(c.id, hourSlot, 4) < 0.15 then
+		local i = math.floor(Rng.hash01(c.id, hourSlot, 5) * #c.errandSpots) + 1
+		return c.errandSpots[i]
+	end
+	return loc
 end
 
 return Schedule

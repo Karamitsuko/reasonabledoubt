@@ -39,6 +39,7 @@ export type Citizen = {
 	eveningStart: number,
 	eveningChance: number,
 	eveningSpot: string?,
+	errandSpots: { string },
 	relationships: { Relationship },
 }
 
@@ -82,7 +83,7 @@ end
 local CitizenGen = {}
 
 function CitizenGen.generate(rng: Rng, world: World): { Citizen }
-	local apartments, diners, bars = {}, {}, {}
+	local apartments, diners, bars, errands = {}, {}, {}, {}
 	local jobSlots: { { room: string, kind: string } } = {}
 	for _, room in world.roomList do
 		if room.kind == "apartment" then
@@ -91,6 +92,9 @@ function CitizenGen.generate(rng: Rng, world: World): { Citizen }
 			table.insert(diners, room.id)
 		elseif room.kind == "bar" then
 			table.insert(bars, room.id)
+		end
+		if room.kind == "diner" or room.kind == "shop" then
+			table.insert(errands, room.id)
 		end
 		local def = JOBS[room.kind]
 		if def then
@@ -180,6 +184,7 @@ function CitizenGen.generate(rng: Rng, world: World): { Citizen }
 			eveningStart = eveningStart,
 			eveningChance = rng:float(0.1, 0.5),
 			eveningSpot = nil,
+			errandSpots = errands,
 			relationships = {},
 		}
 	end

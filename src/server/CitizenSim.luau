@@ -24,6 +24,7 @@ type CitizenState = {
 	spawning: boolean,
 	moving: boolean,
 	token: number,
+	nextIdle: number,
 }
 
 local CitizenSim = {}
@@ -37,6 +38,7 @@ export type CitizenSim = typeof(setmetatable(
 		folder: Folder,
 		rigCount: number,
 		snaps: number,
+		idleRng: Random,
 	},
 	CitizenSim
 ))
@@ -60,6 +62,7 @@ function CitizenSim.new(world: World, citizens: { Citizen }): CitizenSim
 		folder = folder,
 		rigCount = 0,
 		snaps = 0,
+		idleRng = Random.new(),
 	}, CitizenSim)
 	return self
 end
@@ -242,7 +245,7 @@ function CitizenSim.tick(self: CitizenSim, totalMinutes: number)
 		local loc = Schedule.locationAt(c, totalMinutes)
 		local st = self.state[c.id]
 		if not st then
-			st = { loc = loc, spot = self:spotFor(c, loc), rig = nil, spawning = false, moving = false, token = 0 }
+			st = { loc = loc, spot = self:spotFor(c, loc), rig = nil, spawning = false, moving = false, token = 0, nextIdle = 0 }
 			self.state[c.id] = st
 		elseif st.loc ~= loc then
 			local fromLoc, fromSpot = st.loc, st.spot
@@ -260,6 +263,17 @@ function CitizenSim.tick(self: CitizenSim, totalMinutes: number)
 			local rigNear = st.rig.PrimaryPart ~= nil and near((st.rig.PrimaryPart :: BasePart).Position)
 			if loc == "offsite" or (not isNear and not rigNear) then
 				self:despawnRig(st)
+			end
+		end
+
+		-- Idle life: awake people shift around the room every so often instead of standing frozen.
+		if st.rig and not st.moving and loc ~= "offsite" and os.clock() >= st.nextIdle then
+			st.nextIdle = os.clock() + self.idleRng:NextNumber(5, 16)
+			if not Schedule.isAsleep(c, totalMinutes) then
+				local room = self.world.rooms[loc]
+				local hx, hz = room.size.X / 2 - 2.5, room.size.Z / 2 - 2.5
+				st.spot = room.center + Vector3.new(self.idleRng:NextNumber(-hx, hx), 0, self.idleRng:NextNumber(-hz, hz))
+				self:walk(st, { { pos = st.spot } })
 			end
 		end
 	end
