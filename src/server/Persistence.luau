@@ -12,6 +12,7 @@ export type WorldSave = {
 	gameMinutes: number,
 	savedAt: number,
 	citizens: { [string]: any }, -- per-citizen deltas, keyed by id as a string
+	case: any?, -- active case progress (CaseService.serialize)
 }
 
 -- MIGRATIONS[n] upgrades a save from schema n to n + 1.

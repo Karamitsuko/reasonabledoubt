@@ -17,6 +17,7 @@ local CitizenGen = require(Server:WaitForChild("CitizenGen"))
 local CitizenSim = require(Server:WaitForChild("CitizenSim"))
 local Persistence = require(Server:WaitForChild("Persistence"))
 local Atmosphere = require(Server:WaitForChild("Atmosphere"))
+local CaseService = require(Server:WaitForChild("CaseService"))
 
 Players.CharacterAutoLoads = false
 
@@ -37,6 +38,7 @@ local function snapshot(): Persistence.WorldSave
 		gameMinutes = gameMinutes,
 		savedAt = os.time(),
 		citizens = citizenDeltas,
+		case = if ready then CaseService.serialize() else nil,
 	}
 end
 
@@ -75,10 +77,12 @@ end
 local function boot(host: Player)
 	hostId = host.UserId
 	local ok, data, err = Persistence.load(host.UserId)
+	local savedCase = nil
 	if ok and data then
 		seed = data.seed
 		gameMinutes = data.gameMinutes
 		citizenDeltas = data.citizens or {}
+		savedCase = data.case
 		print(("[World] Loaded save: seed %d, minute %.1f"):format(seed, gameMinutes))
 	else
 		seed = Random.new():NextInteger(1, 2 ^ 31 - 2)
@@ -97,6 +101,7 @@ local function boot(host: Player)
 	citizens = CitizenGen.generate(Rng.new(seed + 1), w)
 	sim = CitizenSim.new(w, citizens)
 	wireElevators(w)
+	CaseService.start({ world = w, citizens = citizens, sim = sim :: any, seed = seed, saved = savedCase })
 	print(("[World] Built in %.2fs: %d rooms, %d citizens"):format(os.clock() - t0, #w.roomList, #citizens))
 
 	ready = true
@@ -182,6 +187,14 @@ debugFn.OnInvoke = function(cmd: string, arg: any): any
 		end
 		local ok, data, err = Persistence.load(hostId)
 		return { ok = ok, err = err, seed = data and data.seed, gameMinutes = data and data.gameMinutes, schema = data and data.schema }
+	elseif cmd == "case" then
+		return CaseService.debug()
+	elseif cmd == "resetCase" then
+		CaseService.debugReset()
+		return CaseService.debug()
+	elseif cmd == "discover" then
+		CaseService.debugDiscover(tostring(arg))
+		return CaseService.debug()
 	elseif cmd == "citizen" then
 		local c = citizens[tonumber(arg) or 1]
 		if not c then
