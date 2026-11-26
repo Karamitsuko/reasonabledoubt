@@ -75,6 +75,9 @@ local function placeName(world: World, loc: string): string
 	if room.kind == "apartment" then
 		return "at " .. room.label
 	end
+	if room.label:sub(1, 4) == "The " then
+		return "at " .. room.label
+	end
 	return "at the " .. room.label
 end
 

@@ -12,6 +12,7 @@ local CitizenGen = require(script.Parent:WaitForChild("CitizenGen"))
 local CitizenSim = require(script.Parent:WaitForChild("CitizenSim"))
 local CaseGen = require(script.Parent:WaitForChild("CaseGen"))
 local Knowledge = require(script.Parent:WaitForChild("Knowledge"))
+local CaseBoard = require(script.Parent:WaitForChild("CaseBoard"))
 
 type World = BuildingGen.World
 type Citizen = CitizenGen.Citizen
@@ -23,6 +24,7 @@ export type CaseSave = {
 	todKnown: boolean,
 	solved: boolean,
 	result: string?,
+	board: CaseBoard.Board?,
 }
 
 local MOTIVES = {
@@ -37,7 +39,7 @@ local world: World
 local citizens: { Citizen }
 local sim: CitizenSim.CitizenSim
 local case: Case
-local state: CaseSave = { found = {}, people = {}, todKnown = false, solved = false, result = nil }
+local state: CaseSave = { found = {}, people = {}, todKnown = false, solved = false, result = nil, board = CaseBoard.new() }
 local remotes: Folder
 local sceneFolder: Folder
 
@@ -61,6 +63,10 @@ local function notify(text: string)
 	notifyEvent:FireAllClients(text)
 end
 
+local function board(): CaseBoard.Board
+	return state.board :: CaseBoard.Board
+end
+
 local function knowPerson(id: number, note: string?)
 	local key = tostring(id)
 	local notes = state.people[key]
@@ -68,11 +74,82 @@ local function knowPerson(id: number, note: string?)
 	if not notes then
 		notes = {}
 		state.people[key] = notes
+		CaseBoard.autoPin(board(), "p:" .. key)
 	end
 	if note and not table.find(notes, note) then
 		table.insert(notes, note)
 	end
 	return isNew
+end
+
+-- Everything the player has learned, as notebook items. Pinned or not, these can go on the board.
+type Item = { kind: string, title: string, lines: { string } }
+
+local function notebook(): { [string]: Item }
+	local victim = citizens[case.victimId]
+	local items: { [string]: Item } = {}
+	local function place(roomId: string, why: string)
+		local key = "place:" .. roomId
+		local it = items[key]
+		if not it then
+			local room = world.rooms[roomId]
+			it = { kind = "place", title = room.label, lines = { ("Floor %d"):format(room.floor) } }
+			items[key] = it
+		end
+		table.insert(it.lines, why)
+	end
+	place(case.sceneRoom, "Where " .. fullName(victim) .. " was found.")
+
+	for _, id in case.evidenceOrder do
+		if table.find(state.found, id) then
+			local e = case.evidence[id]
+			items["ev:" .. id] = { kind = "evidence", title = e.label, lines = { e.text } }
+		end
+	end
+
+	for key, notes in state.people do
+		local c = citizens[tonumber(key) :: number]
+		local role = if c.id == victim.id then "Victim" else c.job
+		local lines = { ("%s, lives in %s"):format(role, world.rooms[c.homeRoom].label) }
+		for _, n in notes do
+			table.insert(lines, n)
+		end
+		items["p:" .. key] = { kind = "person", title = fullName(c), lines = lines }
+		if c.homeRoom ~= case.sceneRoom then
+			place(c.homeRoom, "Home of " .. fullName(c) .. ".")
+		end
+	end
+
+	-- Facts pulled out of the evidence, so they can be pinned and linked on their own.
+	local function fact(key: string, title: string, line: string)
+		items["fact:" .. key] = { kind = "fact", title = title, lines = { line } }
+	end
+	if table.find(state.found, "body") then
+		local lo, hi = math.floor((case.tod - 40) / 5) * 5, math.ceil((case.tod + 40) / 5) * 5
+		fact("tod", "Time of death", ("Between %s and %s last night."):format(CaseGen.fmtTime(lo), CaseGen.fmtTime(hi)))
+		fact("method", "Cause of death", if case.method == "blade" then "A single stab wound." else "A blow to the back of the head.")
+	end
+	if table.find(state.found, "footprints") then
+		fact("shoe", "Killer's shoe size", ("Prints at the scene: size %d."):format(citizens[case.killerId].shoeSize))
+	end
+	if table.find(state.found, "note") then
+		fact("initials", "Note signed " .. case.initials, "The threatening note in the victim's pocket is signed " .. case.initials .. ".")
+	end
+	if table.find(state.found, "doorlog") then
+		for i, e in case.doorLog do
+			fact(
+				"log" .. i,
+				"Lift swipe " .. CaseGen.fmtTime(e.minute),
+				("%s, lift %s, floor %d."):format(fullName(citizens[e.citizenId]), e.direction, case.sceneFloor)
+			)
+		end
+		for _, room in world.roomList do
+			if room.kind == "security" then
+				place(room.id, "The lift keycard log is kept here.")
+			end
+		end
+	end
+	return items
 end
 
 local function boardPayload(): any
@@ -84,35 +161,22 @@ local function boardPayload(): any
 			table.insert(evidence, { id = id, label = e.label, text = e.text })
 		end
 	end
-	local people = {}
-	for key, notes in state.people do
-		local c = citizens[tonumber(key) :: number]
-		table.insert(people, {
-			id = c.id,
-			name = fullName(c),
-			role = if c.id == victim.id then "Victim" else c.job,
-			home = world.rooms[c.homeRoom].label,
-			notes = notes,
-		})
+	local b = board()
+	local notes = {}
+	for _, n in b.notes do
+		table.insert(notes, n)
 	end
-	table.sort(people, function(a, b)
-		if a.role == "Victim" then
-			return true
-		elseif b.role == "Victim" then
-			return false
-		end
-		return a.name < b.name
-	end)
 	return {
 		title = "The " .. world.rooms[case.sceneRoom].label .. " case",
 		objective = if state.solved
 			then (state.result or "Case closed.")
-			else ("Find out who killed %s and why. Inspect the scene in %s, talk to people, then file an accusation at your desk (Detective Office, top floor)."):format(
-				fullName(victim),
-				world.rooms[case.sceneRoom].label
-			),
+			else ("Find out who killed %s and why. Then file an accusation at your desk (Detective Office, top floor)."):format(fullName(victim)),
 		evidence = evidence,
-		people = people,
+		items = notebook(),
+		notes = notes,
+		links = b.links,
+		width = CaseBoard.WIDTH,
+		height = CaseBoard.HEIGHT,
 		solved = state.solved,
 	}
 end
@@ -130,6 +194,7 @@ local function discover(id: string, by: Player?)
 	if id == "body" then
 		state.todKnown = true
 	end
+	CaseBoard.autoPin(board(), "ev:" .. id)
 	if e.people then
 		for _, pid in e.people do
 			knowPerson(pid, nil)
@@ -343,9 +408,22 @@ function CaseService.start(args: { world: World, citizens: { Citizen }, sim: Cit
 	case = CaseGen.generate(RngModule.new(args.seed + 2), world, citizens)
 	if args.saved then
 		state = args.saved
+		if not state.board then
+			-- Saves from before the board: pin what was already known.
+			state.board = CaseBoard.new()
+			for _, id in state.found do
+				CaseBoard.autoPin(state.board :: CaseBoard.Board, "ev:" .. id)
+			end
+			for key in state.people do
+				CaseBoard.autoPin(state.board :: CaseBoard.Board, "p:" .. key)
+			end
+		else
+			state.board = CaseBoard.normalize(state.board)
+		end
 	else
 		knowPerson(case.victimId, "Found dead at home: " .. world.rooms[case.sceneRoom].label .. ".")
 	end
+	CaseBoard.autoPin(board(), "place:" .. case.sceneRoom)
 
 	-- The victim is out of the simulation; their body is at the scene.
 	sim:exclude(case.victimId)
@@ -364,6 +442,17 @@ function CaseService.start(args: { world: World, citizens: { Citizen }, sim: Cit
 
 	getBoard.OnServerInvoke = function()
 		return boardPayload()
+	end
+
+	local boardAction = remote("RemoteFunction", "BoardAction") :: RemoteFunction
+	boardAction.OnServerInvoke = function(player: Player, action: any, args: any)
+		local changed, err = CaseBoard.apply(board(), player, action, args, function(item: string)
+			return notebook()[item] ~= nil
+		end)
+		if changed then
+			pushBoard()
+		end
+		return { ok = changed, err = err }
 	end
 
 	ask.OnServerInvoke = function(player: Player, citizenId: any, qid: any, evidenceId: any)
@@ -452,8 +541,9 @@ end
 
 -- Wipe case progress (testing only): the scene stays, the board starts over.
 function CaseService.debugReset()
-	state = { found = {}, people = {}, todKnown = false, solved = false, result = nil }
+	state = { found = {}, people = {}, todKnown = false, solved = false, result = nil, board = CaseBoard.new() }
 	knowPerson(case.victimId, "Found dead at home: " .. world.rooms[case.sceneRoom].label .. ".")
+	CaseBoard.autoPin(board(), "place:" .. case.sceneRoom)
 	pushBoard()
 end
 
