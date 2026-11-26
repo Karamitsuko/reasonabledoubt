@@ -195,6 +195,8 @@ debugFn.OnInvoke = function(cmd: string, arg: any): any
 	elseif cmd == "noSave" then
 		savingDisabled = true
 		return true
+	elseif cmd == "hint" then
+		return CaseService.debugHint()
 	elseif cmd == "resetCase" then
 		CaseService.debugReset()
 		return CaseService.debug()

@@ -17,6 +17,7 @@ local Furnish = require(script.Parent:WaitForChild("Furnish"))
 local BodyExam = require(script.Parent:WaitForChild("BodyExam"))
 local Prints = require(script.Parent:WaitForChild("Prints"))
 local Photos = require(script.Parent:WaitForChild("Photos"))
+local Hints = require(script.Parent:WaitForChild("Hints"))
 
 type World = BuildingGen.World
 type Citizen = CitizenGen.Citizen
@@ -32,6 +33,7 @@ export type CaseSave = {
 	body: BodyExam.BodyState?,
 	prints: Prints.PrintsState?,
 	photos: { Photos.Photo }?,
+	hunches: { { id: string, text: string } }?,
 }
 
 local MOTIVES = {
@@ -47,7 +49,7 @@ local citizens: { Citizen }
 local sim: CitizenSim.CitizenSim
 local furniture: Furnish.Furniture
 local case: Case
-local state: CaseSave = { found = {}, people = {}, todKnown = false, solved = false, result = nil, board = CaseBoard.new(), body = {}, prints = Prints.new(), photos = {} }
+local state: CaseSave = { found = {}, people = {}, todKnown = false, solved = false, result = nil, board = CaseBoard.new(), body = {}, prints = Prints.new(), photos = {}, hunches = {} }
 local remotes: Folder
 local sceneFolder: Folder
 local caseSeed = 0
@@ -152,6 +154,9 @@ local function notebook(): { [string]: Item }
 	Prints.items(printState(), citizens, function(key: string, kind: string, title: string, lines: { string })
 		items[key] = { kind = kind, title = title, lines = lines }
 	end)
+	for i, h in state.hunches or {} do
+		items["hunch:" .. i] = { kind = "fact", title = "Hunch", lines = { h.text } }
+	end
 	Photos.items(state.photos or {}, function(key: string, kind: string, title: string, lines: { string }, n: number?)
 		items[key] = { kind = kind, title = title, lines = lines, photo = n }
 	end)
@@ -209,6 +214,34 @@ end
 
 local function pushBoard()
 	boardEvent:FireAllClients(boardPayload())
+end
+
+-- A hunch for a stuck player: the next lead they haven't followed, in general terms.
+local function giveHunch(): boolean
+	local given = {}
+	for _, h in state.hunches or {} do
+		given[h.id] = true
+	end
+	local people = 0
+	for _ in state.people do
+		people += 1
+	end
+	local body = state.body or {}
+	local id, text = Hints.next({
+		found = state.found,
+		bodyExamined = body.temp ~= nil or body.wound == true,
+		printsLifted = #printState().lifted,
+		people = people,
+		given = given,
+	})
+	if not id or not text then
+		return false
+	end
+	state.hunches = state.hunches or {}
+	table.insert(state.hunches :: { { id: string, text: string } }, { id = id, text = text })
+	notify("A hunch: " .. text)
+	pushBoard()
+	return true
 end
 
 local function discover(id: string, by: Player?)
@@ -521,6 +554,7 @@ function CaseService.start(args: { world: World, citizens: { Citizen }, sim: Cit
 			state.board = CaseBoard.normalize(state.board)
 		end
 		state.prints = Prints.normalize(state.prints)
+		state.hunches = if typeof(state.hunches) == "table" then state.hunches else {}
 		state.photos = if typeof(state.photos) == "table" then state.photos else {}
 		if not state.body then
 			-- Saves from before the close-up exam: an inspected body keeps what it told you.
@@ -657,14 +691,60 @@ function CaseService.start(args: { world: World, citizens: { Citizen }, sim: Cit
 			motiveWords,
 			score
 		)
+		-- How complete the case file was, whatever the verdict.
+		local counts = { people = 0, places = 0, evidence = 0, facts = 0, prints = 0, photos = 0, notes = 0, strings = #board().links }
+		for key, it in notebook() do
+			if it.kind == "person" then
+				counts.people += 1
+			elseif it.kind == "place" then
+				counts.places += 1
+			elseif it.kind == "evidence" then
+				counts.evidence += 1
+			elseif it.kind == "print" then
+				counts.prints += 1
+			elseif it.kind == "photo" then
+				counts.photos += 1
+			elseif it.kind == "fact" and not key:find("^hunch:") then
+				counts.facts += 1
+			end
+		end
+		for _ in board().notes do
+			counts.notes += 1
+		end
+		local _, summary = Hints.thoroughness(counts, #(state.hunches or {}))
 		state.solved = true
-		state.result = verdict .. " " .. truth
+		state.result = verdict .. " " .. truth .. " " .. summary
 		notify(player.DisplayName .. " filed an accusation against " .. fullName(suspect) .. ".")
 		pushBoard()
 		return { text = state.result, correct = rightKiller }
 	end
 
 	placeScene()
+
+	-- Watch for a stuck player: nothing new in the notebook for a long while earns a hunch.
+	task.spawn(function()
+		local lastCount, lastProgress = -1, os.clock()
+		while true do
+			task.wait(Hints.CHECK_EVERY)
+			if state.solved or #Players:GetPlayers() == 0 then
+				lastProgress = os.clock()
+				continue
+			end
+			local n = 0
+			for key in notebook() do
+				if not key:find("^hunch:") then
+					n += 1
+				end
+			end
+			if n ~= lastCount then
+				lastCount, lastProgress = n, os.clock()
+			elseif os.clock() - lastProgress >= Hints.STUCK_SECONDS then
+				lastProgress = os.clock()
+				giveHunch()
+			end
+		end
+	end)
+
 	task.delay(4, function()
 		notify(("Case file: a neighbour hasn't seen %s since last night. Check %s."):format(
 			fullName(citizens[case.victimId]),
@@ -687,10 +767,14 @@ end
 
 -- Wipe case progress (testing only): the scene stays, the board starts over.
 function CaseService.debugReset()
-	state = { found = {}, people = {}, todKnown = false, solved = false, result = nil, board = CaseBoard.new(), body = {}, prints = Prints.new(), photos = {} }
+	state = { found = {}, people = {}, todKnown = false, solved = false, result = nil, board = CaseBoard.new(), body = {}, prints = Prints.new(), photos = {}, hunches = {} }
 	knowPerson(case.victimId, "Found dead at home: " .. world.rooms[case.sceneRoom].label .. ".")
 	CaseBoard.autoPin(board(), "place:" .. case.sceneRoom)
 	pushBoard()
+end
+
+function CaseService.debugHint(): boolean
+	return giveHunch()
 end
 
 function CaseService.debugDiscover(id: string)
