@@ -18,6 +18,7 @@ local CitizenSim = require(Server:WaitForChild("CitizenSim"))
 local Persistence = require(Server:WaitForChild("Persistence"))
 local Atmosphere = require(Server:WaitForChild("Atmosphere"))
 local CaseService = require(Server:WaitForChild("CaseService"))
+local Furnish = require(Server:WaitForChild("Furnish"))
 
 Players.CharacterAutoLoads = false
 
@@ -30,6 +31,7 @@ local citizens: { CitizenGen.Citizen } = {}
 local sim: CitizenSim.CitizenSim? = nil
 local citizenDeltas: { [string]: any } = {}
 local lastSave: { ok: boolean, at: number, err: string? }? = nil
+local savingDisabled = false -- set from the debug hook so tests never touch the real save
 
 local function snapshot(): Persistence.WorldSave
 	return {
@@ -43,7 +45,7 @@ local function snapshot(): Persistence.WorldSave
 end
 
 local function saveWorld(reason: string): boolean
-	if not hostId or not ready then
+	if not hostId or not ready or savingDisabled then
 		return false
 	end
 	local ok, err = Persistence.save(hostId, snapshot())
@@ -101,7 +103,8 @@ local function boot(host: Player)
 	citizens = CitizenGen.generate(Rng.new(seed + 1), w)
 	sim = CitizenSim.new(w, citizens)
 	wireElevators(w)
-	CaseService.start({ world = w, citizens = citizens, sim = sim :: any, seed = seed, saved = savedCase })
+	local furniture = Furnish.furnish(w, Rng.new(seed + 3))
+	CaseService.start({ world = w, citizens = citizens, sim = sim :: any, furniture = furniture, seed = seed, saved = savedCase })
 	print(("[World] Built in %.2fs: %d rooms, %d citizens"):format(os.clock() - t0, #w.roomList, #citizens))
 
 	ready = true
@@ -189,6 +192,11 @@ debugFn.OnInvoke = function(cmd: string, arg: any): any
 		return { ok = ok, err = err, seed = data and data.seed, gameMinutes = data and data.gameMinutes, schema = data and data.schema }
 	elseif cmd == "case" then
 		return CaseService.debug()
+	elseif cmd == "noSave" then
+		savingDisabled = true
+		return true
+	elseif cmd == "hint" then
+		return CaseService.debugHint()
 	elseif cmd == "resetCase" then
 		CaseService.debugReset()
 		return CaseService.debug()
