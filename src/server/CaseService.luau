@@ -13,6 +13,7 @@ local CitizenSim = require(script.Parent:WaitForChild("CitizenSim"))
 local CaseGen = require(script.Parent:WaitForChild("CaseGen"))
 local Knowledge = require(script.Parent:WaitForChild("Knowledge"))
 local CaseBoard = require(script.Parent:WaitForChild("CaseBoard"))
+local Furnish = require(script.Parent:WaitForChild("Furnish"))
 
 type World = BuildingGen.World
 type Citizen = CitizenGen.Citizen
@@ -38,6 +39,7 @@ local CaseService = {}
 local world: World
 local citizens: { Citizen }
 local sim: CitizenSim.CitizenSim
+local furniture: Furnish.Furniture
 local case: Case
 local state: CaseSave = { found = {}, people = {}, todKnown = false, solved = false, result = nil, board = CaseBoard.new() }
 local remotes: Folder
@@ -290,23 +292,30 @@ local function placeScene()
 		first = first or pp
 	end
 	part(sceneFolder, "Spill", Vector3.new(2.2, 0.04, 2.2), CFrame.new(bodyPos:Lerp(door, 0.25).X, floorY + 0.07, bodyPos:Lerp(door, 0.25).Z), Color3.fromRGB(55, 34, 20), Enum.Material.Glass)
-	if first then
-		local big = part(sceneFolder, "PrintsZone", Vector3.new(3, 0.5, 3), CFrame.new(bodyPos:Lerp(door, 0.6).X, floorY + 0.3, bodyPos:Lerp(door, 0.6).Z), Color3.new(), nil)
-		big.Transparency = 1
-		evidencePrompt(big, "Examine prints", "footprints")
+	-- Looking closely at the prints (clicking them) records them.
+	for _, pr in prints:GetChildren() do
+		local cd = Instance.new("ClickDetector")
+		cd.MaxActivationDistance = 10
+		cd.Parent = pr
+		cd.MouseClick:Connect(function(player)
+			discover("footprints", player)
+		end)
 	end
 
-	-- The weapon, in the hallway bin by the lift.
-	local bin = part(
-		sceneFolder,
-		"HallBin",
-		Vector3.new(1.6, 2.4, 1.6),
-		CFrame.new(1.5, floorY + 1.2, 2.8),
-		Color3.fromRGB(40, 44, 46),
-		Enum.Material.Metal
-	)
-	bin.CanCollide = true
-	evidencePrompt(bin, "Search bin", "weapon")
+	-- The weapon, dumped in the bin by the lift. You only find it if you lift the lid.
+	local hallBin = furniture.hallBins[scene.floor]
+	local weapon = if case.method == "blade"
+		then Furnish.item(hallBin, "Knife", {
+			{ size = Vector3.new(0.1, 0.05, 0.9), offset = CFrame.new(0, -0.12, -0.3), color = Color3.fromRGB(170, 172, 178), mat = Enum.Material.Metal },
+			{ size = Vector3.new(0.16, 0.12, 0.55), offset = CFrame.new(0, -0.1, 0.4), color = Color3.fromRGB(24, 22, 22), mat = Enum.Material.Plastic },
+		})
+		else Furnish.item(hallBin, "Ashtray", {
+			{ size = Vector3.new(0.9, 0.3, 0.9), offset = CFrame.new(0, -0.05, 0), color = Color3.fromRGB(150, 180, 190), mat = Enum.Material.Glass },
+		})
+	weapon:SetAttribute("Evidence", "weapon")
+	if table.find(state.found, "weapon") then
+		weapon:Destroy() -- already bagged in an earlier session
+	end
 
 	-- Lift log terminal in the security office.
 	for _, room in world.roomList do
@@ -319,7 +328,12 @@ local function placeScene()
 				Color3.fromRGB(80, 200, 255),
 				Enum.Material.Neon
 			)
-			evidencePrompt(term, "Read lift log", "doorlog")
+			local cd = Instance.new("ClickDetector")
+			cd.MaxActivationDistance = 10
+			cd.Parent = term
+			cd.MouseClick:Connect(function(player)
+				discover("doorlog", player)
+			end)
 		elseif room.kind == "detective" then
 			local desk = part(
 				sceneFolder,
@@ -356,17 +370,30 @@ local function placeScene()
 		end
 	end
 
-	-- Boots in the killer's apartment.
-	local kRoom = world.rooms[citizens[case.killerId].homeRoom]
-	local boots = part(
-		sceneFolder,
-		"Boots",
-		Vector3.new(1.4, 0.8, 1.2),
-		CFrame.new(kRoom.doorInner.X + 2.5, kRoom.center.Y - 2.6, kRoom.doorInner.Z + (if kRoom.center.Z > 0 then 1.5 else -1.5)),
-		Color3.fromRGB(34, 24, 20),
-		Enum.Material.Leather
-	)
-	evidencePrompt(boots, "Look at boots", "boots")
+	-- The boots, pushed to the back of the killer's wardrobe.
+	local wardrobe = furniture.rooms[citizens[case.killerId].homeRoom].wardrobe
+	local boots = Furnish.item(wardrobe, "Boots", {
+		{ size = Vector3.new(0.5, 0.7, 1.0), offset = CFrame.new(-0.3, 0.2, 0), color = Color3.fromRGB(34, 24, 20), mat = Enum.Material.Leather },
+		{ size = Vector3.new(0.5, 0.7, 1.0), offset = CFrame.new(0.3, 0.2, 0.1), color = Color3.fromRGB(34, 24, 20), mat = Enum.Material.Leather },
+	})
+	boots:SetAttribute("Evidence", "boots")
+	if table.find(state.found, "boots") then
+		boots:Destroy()
+	end
+
+	-- Picking things up: evidence goes in a bag and onto the board; junk is just junk.
+	furniture.onItemClicked = function(player: Player, item: Model)
+		local ev = item:GetAttribute("Evidence")
+		if typeof(ev) == "string" then
+			item:Destroy()
+			discover(ev, player)
+			return
+		end
+		local j = item:GetAttribute("Junk")
+		if typeof(j) == "string" then
+			notifyEvent:FireClient(player, j)
+		end
+	end
 end
 
 local function ctx(): Knowledge.Ctx
@@ -374,6 +401,12 @@ local function ctx(): Knowledge.Ctx
 end
 
 local function onRigSpawned(c: Citizen, rig: Model)
+	-- Citizens walk through furniture rather than getting stuck on it.
+	for _, d in rig:GetDescendants() do
+		if d:IsA("BasePart") then
+			d.CollisionGroup = "Citizens"
+		end
+	end
 	local root = rig:FindFirstChild("HumanoidRootPart") :: BasePart?
 	if not root then
 		return
@@ -401,8 +434,9 @@ local function onRigSpawned(c: Citizen, rig: Model)
 	end)
 end
 
-function CaseService.start(args: { world: World, citizens: { Citizen }, sim: CitizenSim.CitizenSim, seed: number, saved: CaseSave? })
+function CaseService.start(args: { world: World, citizens: { Citizen }, sim: CitizenSim.CitizenSim, furniture: Furnish.Furniture, seed: number, saved: CaseSave? })
 	world = args.world
+	furniture = args.furniture
 	citizens = args.citizens
 	sim = args.sim
 	case = CaseGen.generate(RngModule.new(args.seed + 2), world, citizens)
