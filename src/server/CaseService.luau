@@ -14,6 +14,7 @@ local CaseGen = require(script.Parent:WaitForChild("CaseGen"))
 local Knowledge = require(script.Parent:WaitForChild("Knowledge"))
 local CaseBoard = require(script.Parent:WaitForChild("CaseBoard"))
 local Furnish = require(script.Parent:WaitForChild("Furnish"))
+local BodyExam = require(script.Parent:WaitForChild("BodyExam"))
 
 type World = BuildingGen.World
 type Citizen = CitizenGen.Citizen
@@ -26,6 +27,7 @@ export type CaseSave = {
 	solved: boolean,
 	result: string?,
 	board: CaseBoard.Board?,
+	body: BodyExam.BodyState?,
 }
 
 local MOTIVES = {
@@ -41,9 +43,11 @@ local citizens: { Citizen }
 local sim: CitizenSim.CitizenSim
 local furniture: Furnish.Furniture
 local case: Case
-local state: CaseSave = { found = {}, people = {}, todKnown = false, solved = false, result = nil, board = CaseBoard.new() }
+local state: CaseSave = { found = {}, people = {}, todKnown = false, solved = false, result = nil, board = CaseBoard.new(), body = {} }
 local remotes: Folder
 local sceneFolder: Folder
+local caseSeed = 0
+local receipt: { minute: number, bar: string }? = nil
 
 local function fullName(c: Citizen): string
 	return c.firstName .. " " .. c.lastName
@@ -126,16 +130,12 @@ local function notebook(): { [string]: Item }
 	local function fact(key: string, title: string, line: string)
 		items["fact:" .. key] = { kind = "fact", title = title, lines = { line } }
 	end
-	if table.find(state.found, "body") then
-		local lo, hi = math.floor((case.tod - 40) / 5) * 5, math.ceil((case.tod + 40) / 5) * 5
-		fact("tod", "Time of death", ("Between %s and %s last night."):format(CaseGen.fmtTime(lo), CaseGen.fmtTime(hi)))
-		fact("method", "Cause of death", if case.method == "blade" then "A single stab wound." else "A blow to the back of the head.")
-	end
+	BodyExam.facts(state.body or {}, case, receipt, fact)
 	if table.find(state.found, "footprints") then
 		fact("shoe", "Killer's shoe size", ("Prints at the scene: size %d."):format(citizens[case.killerId].shoeSize))
 	end
 	if table.find(state.found, "note") then
-		fact("initials", "Note signed " .. case.initials, "The threatening note in the victim's pocket is signed " .. case.initials .. ".")
+		fact("initials", "Note signed " .. case.initials, "The threatening note in the victim's pocket is signed " .. case.initials)
 	end
 	if table.find(state.found, "doorlog") then
 		for i, e in case.doorLog do
@@ -193,9 +193,6 @@ local function discover(id: string, by: Player?)
 	end
 	table.insert(state.found, id)
 	local e = case.evidence[id]
-	if id == "body" then
-		state.todKnown = true
-	end
 	CaseBoard.autoPin(board(), "ev:" .. id)
 	if e.people then
 		for _, pid in e.people do
@@ -232,12 +229,6 @@ local function prompt(target: BasePart, action: string, object: string, onTrigge
 	return pp
 end
 
-local function evidencePrompt(target: BasePart, action: string, id: string)
-	prompt(target, action, case.evidence[id].label, function(player)
-		discover(id, player)
-	end)
-end
-
 local function placeScene()
 	sceneFolder = Instance.new("Folder")
 	sceneFolder.Name = "CaseScene"
@@ -271,13 +262,33 @@ local function placeScene()
 	else
 		bodyAnchor = part(sceneFolder, "Body", Vector3.new(2, 1, 5), CFrame.new(bodyPos.X, floorY + 0.5, bodyPos.Z), victim.shirtColor)
 	end
-	evidencePrompt(bodyAnchor, "Inspect body", "body")
-	-- The note lives in the victim's pocket: searching the body finds it too.
-	local pockets = prompt(bodyAnchor, "Search pockets", fullName(victim), function(player)
-		discover("note", player)
-	end)
-	pockets.KeyboardKeyCode = Enum.KeyCode.R
-	pockets.UIOffset = Vector2.new(0, 70)
+	-- Up close: click the body to examine it with tools (BodyExam). The note is in one of the pockets.
+	receipt = BodyExam.setup({
+		case = case,
+		victim = victim,
+		sceneLabel = scene.label,
+		seed = caseSeed,
+		body = rig or bodyAnchor,
+		bodyPos = bodyPos,
+		remotes = remotes,
+		state = function()
+			state.body = state.body or {}
+			return state.body :: BodyExam.BodyState
+		end,
+		isFound = function(id: string)
+			return table.find(state.found, id) ~= nil
+		end,
+		discover = function(id: string, player: Player)
+			discover(id, player)
+		end,
+		noteText = function()
+			return case.evidence.note.text
+		end,
+		changed = pushBoard,
+		setTodKnown = function()
+			state.todKnown = true
+		end,
+	})
 
 	-- Shoe prints in spilled coffee, by the door.
 	local door = scene.doorInner
@@ -439,6 +450,7 @@ function CaseService.start(args: { world: World, citizens: { Citizen }, sim: Cit
 	furniture = args.furniture
 	citizens = args.citizens
 	sim = args.sim
+	caseSeed = args.seed
 	case = CaseGen.generate(RngModule.new(args.seed + 2), world, citizens)
 	if args.saved then
 		state = args.saved
@@ -453,6 +465,14 @@ function CaseService.start(args: { world: World, citizens: { Citizen }, sim: Cit
 			end
 		else
 			state.board = CaseBoard.normalize(state.board)
+		end
+		if not state.body then
+			-- Saves from before the close-up exam: an inspected body keeps what it told you.
+			state.body = {}
+			if table.find(state.found, "body") then
+				local at = case.tod + 8 * 60
+				state.body = { wound = true, tempAt = at, temp = math.floor((37 - BodyExam.COOL_PER_HOUR * 8) * 10 + 0.5) / 10 }
+			end
 		end
 	else
 		knowPerson(case.victimId, "Found dead at home: " .. world.rooms[case.sceneRoom].label .. ".")
@@ -575,7 +595,7 @@ end
 
 -- Wipe case progress (testing only): the scene stays, the board starts over.
 function CaseService.debugReset()
-	state = { found = {}, people = {}, todKnown = false, solved = false, result = nil, board = CaseBoard.new() }
+	state = { found = {}, people = {}, todKnown = false, solved = false, result = nil, board = CaseBoard.new(), body = {} }
 	knowPerson(case.victimId, "Found dead at home: " .. world.rooms[case.sceneRoom].label .. ".")
 	CaseBoard.autoPin(board(), "place:" .. case.sceneRoom)
 	pushBoard()

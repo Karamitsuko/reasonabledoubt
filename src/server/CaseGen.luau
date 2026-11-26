@@ -137,18 +137,10 @@ function CaseGen.generate(rng: Rng, world: World, citizens: { Citizen }): Case
 		evidence[e.id] = e
 	end
 
-	local lo, hi = math.floor((tod - 40) / 5) * 5, math.ceil((tod + 40) / 5) * 5
 	add({
 		id = "body",
 		label = "The body: " .. fullName(v),
-		text = (if method == "blade"
-			then "A single stab wound to the abdomen."
-			else "Blunt force trauma to the back of the head.")
-			.. " No sign of forced entry, so the victim let the killer in. Body temperature and rigor put the time of death between "
-			.. CaseGen.fmtTime(lo)
-			.. " and "
-			.. CaseGen.fmtTime(hi)
-			.. ".",
+		text = "Lying on the floor of their own apartment. No sign of forced entry, so they let the killer in.",
 		roomId = scene.id,
 	})
 	add({
@@ -165,7 +157,7 @@ function CaseGen.generate(rng: Rng, world: World, citizens: { Citizen }): Case
 	add({
 		id = "note",
 		label = "Crumpled note",
-		text = noteText .. " Found in the victim's coat pocket.",
+		text = noteText .. " Found in the victim's pocket.",
 		roomId = scene.id,
 	})
 	add({
