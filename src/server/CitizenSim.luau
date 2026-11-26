@@ -39,6 +39,9 @@ export type CitizenSim = typeof(setmetatable(
 		rigCount: number,
 		snaps: number,
 		idleRng: Random,
+		excluded: { [number]: boolean },
+		onRigSpawned: ((Citizen, Model) -> ())?,
+		keepClear: { { pos: Vector3, radius: number } },
 	},
 	CitizenSim
 ))
@@ -63,11 +66,26 @@ function CitizenSim.new(world: World, citizens: { Citizen }): CitizenSim
 		rigCount = 0,
 		snaps = 0,
 		idleRng = Random.new(),
+		excluded = {},
+		onRigSpawned = nil,
+		keepClear = {},
 	}, CitizenSim)
 	return self
 end
 
 -- A stable standing spot for this citizen inside a location.
+-- Push a standing spot out of any keep-clear zone (a crime scene, for example).
+function CitizenSim.clearOf(self: CitizenSim, p: Vector3): Vector3
+	for _, z in self.keepClear do
+		local d = Vector3.new(p.X - z.pos.X, 0, p.Z - z.pos.Z)
+		if math.abs(p.Y - z.pos.Y) < 6 and d.Magnitude < z.radius then
+			local dir = if d.Magnitude > 0.01 then d.Unit else Vector3.new(1, 0, 0)
+			p = Vector3.new(z.pos.X, p.Y, z.pos.Z) + dir * z.radius
+		end
+	end
+	return p
+end
+
 function CitizenSim.spotFor(self: CitizenSim, c: Citizen, loc: string): Vector3
 	if loc == "offsite" then
 		local r = Random.new(c.id * 7 + 1)
@@ -76,7 +94,7 @@ function CitizenSim.spotFor(self: CitizenSim, c: Citizen, loc: string): Vector3
 	local room = self.world.rooms[loc]
 	local r = Random.new(c.id * 1000 + strHash(loc))
 	local hx, hz = room.size.X / 2 - 2.5, room.size.Z / 2 - 2.5
-	return room.center + Vector3.new(r:NextNumber(-hx, hx), 0, r:NextNumber(-hz, hz))
+	return self:clearOf(room.center + Vector3.new(r:NextNumber(-hx, hx), 0, r:NextNumber(-hz, hz)))
 end
 
 function CitizenSim.pathToCorridor(self: CitizenSim, loc: string, spot: Vector3): (number, { Vector3 })
@@ -115,7 +133,7 @@ function CitizenSim.locPosition(self: CitizenSim, loc: string): Vector3
 	return self.world.rooms[loc].center
 end
 
-local function buildRig(c: Citizen): Model?
+function CitizenSim.buildRig(c: Citizen): Model?
 	local desc = Instance.new("HumanoidDescription")
 	desc.HeadColor = c.skinTone
 	desc.TorsoColor = c.shirtColor
@@ -138,7 +156,7 @@ function CitizenSim.spawnRig(self: CitizenSim, c: Citizen, st: CitizenState)
 	st.spawning = true
 	self.rigCount += 1
 	task.spawn(function()
-		local rig = buildRig(c)
+		local rig = CitizenSim.buildRig(c)
 		st.spawning = false
 		if not rig then
 			self.rigCount -= 1
@@ -163,7 +181,46 @@ function CitizenSim.spawnRig(self: CitizenSim, c: Citizen, st: CitizenState)
 			end)
 		end
 		st.rig = rig
+		if self.onRigSpawned then
+			self.onRigSpawned(c, rig)
+		end
 	end)
+end
+
+-- Take a citizen out of the simulation (for example, a murder victim).
+function CitizenSim.exclude(self: CitizenSim, id: number)
+	self.excluded[id] = true
+	local st = self.state[id]
+	if st then
+		self:despawnRig(st)
+	end
+end
+
+function CitizenSim.rigFor(self: CitizenSim, id: number): Model?
+	local st = self.state[id]
+	return st and st.rig
+end
+
+-- Stop a citizen where they stand for a while (being interviewed), turned toward the player.
+function CitizenSim.hold(self: CitizenSim, id: number, seconds: number, facing: Player?)
+	local st = self.state[id]
+	if not st or not st.rig then
+		return
+	end
+	st.token += 1
+	st.moving = false
+	st.nextIdle = os.clock() + seconds
+	local rig = st.rig :: Model
+	local hum = rig:FindFirstChildOfClass("Humanoid")
+	local root = rig.PrimaryPart
+	if hum and root then
+		hum:MoveTo(root.Position)
+		local char = facing and facing.Character
+		if char then
+			local target = char:GetPivot().Position
+			root.CFrame = CFrame.lookAt(root.Position, Vector3.new(target.X, root.Position.Y, target.Z))
+		end
+	end
 end
 
 function CitizenSim.despawnRig(self: CitizenSim, st: CitizenState)
@@ -242,6 +299,9 @@ function CitizenSim.tick(self: CitizenSim, totalMinutes: number)
 	end
 
 	for _, c in self.citizens do
+		if self.excluded[c.id] then
+			continue
+		end
 		local loc = Schedule.locationAt(c, totalMinutes)
 		local st = self.state[c.id]
 		if not st then
@@ -272,7 +332,7 @@ function CitizenSim.tick(self: CitizenSim, totalMinutes: number)
 			if not Schedule.isAsleep(c, totalMinutes) then
 				local room = self.world.rooms[loc]
 				local hx, hz = room.size.X / 2 - 2.5, room.size.Z / 2 - 2.5
-				st.spot = room.center + Vector3.new(self.idleRng:NextNumber(-hx, hx), 0, self.idleRng:NextNumber(-hz, hz))
+				st.spot = self:clearOf(room.center + Vector3.new(self.idleRng:NextNumber(-hx, hx), 0, self.idleRng:NextNumber(-hz, hz)))
 				self:walk(st, { { pos = st.spot } })
 			end
 		end
